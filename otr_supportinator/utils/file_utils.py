@@ -8,6 +8,10 @@ from PyQt6.QtWidgets import QFileDialog, QMessageBox
 from openpyxl import load_workbook
 
 def process_file(file_path):
+    if not file_path or not os.path.isfile(file_path):
+        raise ValueError(f"Invalid file path: {file_path}")
+    
+    print(f"Processing file: {file_path}")  # Debug print
     try:
         print(f"\nProcessing file: {file_path}")
         

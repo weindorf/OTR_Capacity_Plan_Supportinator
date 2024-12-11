@@ -11,11 +11,5 @@ class SummaryFileCombinerTab(BaseTab):
 
     def init_ui(self):
         layout = QVBoxLayout()
-        layout.addWidget(QLabel("Summary File Combiner"))
-        self.setLayout(layout)
-
-    def process(self):
-        pass
-
-    def restart(self):
-        pass
+        # Add your widgets to the layout here
+        layout.addWidget(QLabel("Summary File Combiner tab - To be implemented"))

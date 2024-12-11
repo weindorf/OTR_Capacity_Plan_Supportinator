@@ -1,5 +1,5 @@
 # gui_components.py
-
+import os
 from PyQt6.QtWidgets import (QLabel, QListWidget, QVBoxLayout, QPushButton, 
                              QWidget, QListWidgetItem, QFileDialog, QMessageBox,
                              QProgressDialog, QDialog, QProgressBar)
@@ -154,16 +154,17 @@ class FileDropArea(QWidget):
         self.add_files(files)
 
     def add_files(self, files):
-        existing_files = set(self.file_list.item(i).text() for i in range(self.file_list.count()))
-        new_files = [f for f in files if f not in existing_files]
-        
-        for file in new_files:
-            item = QListWidgetItem(file)
-            self.file_list.addItem(item)
+        for file in files:
+            if file and os.path.isfile(file):  # Check if file exists
+                item = QListWidgetItem(os.path.basename(file))
+                item.setData(Qt.ItemDataRole.UserRole, file)
+                self.file_list.addItem(item)
+            else:
+                print(f"Invalid file: {file}")  # Debug print
         
         self.update_label()
         
-        if new_files:
+        if files:
             self.files_added.emit()
 
     def update_label(self):

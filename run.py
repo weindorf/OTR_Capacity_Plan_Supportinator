@@ -1,5 +1,7 @@
 import sys
+print("Python path:", sys.path)
 import os
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 # Add the project root to the Python path
 project_root = os.path.abspath(os.path.dirname(__file__))

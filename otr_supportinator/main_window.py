@@ -6,11 +6,10 @@ from .tabs.summary_file_generator_tab import SummaryFileGeneratorTab
 from .tabs.pop_tab import PopTab
 from .tabs.summary_file_combiner_tab import SummaryFileCombinerTab
 
-
-# i like fried chicken
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.temp_dir = tempfile.mkdtemp()
         self.setWindowTitle("OTR Capacity Plan Upload Supportinator")
         self.setGeometry(100, 100, 800, 600)
 
@@ -35,6 +34,20 @@ class MainWindow(QMainWindow):
         self.create_menu_bar()
 
         self.temp_dir = tempfile.mkdtemp()
+
+    def closeEvent(self, event):
+        # Clean up the temporary directory when the application closes
+        for filename in os.listdir(self.temp_dir):
+            file_path = os.path.join(self.temp_dir, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    os.rmdir(file_path)
+            except Exception as e:
+                print(f'Failed to delete {file_path}. Reason: {e}')
+        os.rmdir(self.temp_dir)
+        super().closeEvent(event)
 
     def create_menu_bar(self):
         menu_bar = QMenuBar(self)

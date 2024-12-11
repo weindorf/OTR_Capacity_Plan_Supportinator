@@ -6,7 +6,8 @@ import pandas as pd
 from datetime import datetime
 from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
                              QSpinBox, QLineEdit, QTextEdit, QProgressDialog,
-                             QMessageBox, QFileDialog, QComboBox, QGroupBox, QFormLayout)
+                             QMessageBox, QFileDialog, QComboBox, QGroupBox, 
+                             QFormLayout, QMainWindow)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from .base_tab import BaseTab
 from ..utils.gui_components import FileDropArea
@@ -71,23 +72,16 @@ class SummaryFileGeneratorWorker(QThread):
         for i, file_path in enumerate(self.files, 1):
             self.progress_update.emit(int(90 * i / total_files), f"Processing file {i} of {total_files}")
             
-            # Redirect stdout to a string buffer
-            old_stdout = sys.stdout
-            sys.stdout = output = io.StringIO()
+            if file_path is None:
+                self.log_message.emit(f"Skipping file {i}: Invalid file path")
+                continue
             
             try:
                 result = process_file(file_path)
                 if result is not None:
                     results.append(result)
-            finally:
-                # Restore stdout and get the captured output
-                sys.stdout = old_stdout
-                captured_output = output.getvalue()
-                
-                # Emit the captured output as log messages
-                for line in captured_output.split('\n'):
-                    if line.strip():
-                        self.log_message.emit(line)
+            except Exception as e:
+                self.log_message.emit(f"Error processing file {file_path}: {str(e)}")
             
             if self.is_cancelled:
                 raise Exception("Operation cancelled by user")
@@ -220,8 +214,8 @@ class SummaryFileGeneratorWorker(QThread):
 class SummaryFileGeneratorTab(BaseTab):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.main_window = self.get_main_window()
         self.init_ui()
-        self.custom_output_name = False
 
     def init_ui(self):
         self.file_drop_area = FileDropArea()
@@ -263,14 +257,27 @@ class SummaryFileGeneratorTab(BaseTab):
 
         self.update_filename_preview()
 
+    def get_main_window(self):
+        parent = self.parent()
+        while parent is not None:
+            if isinstance(parent, QMainWindow):
+                return parent
+            parent = parent.parent()
+        return None
+
     def process(self):
         files = [self.file_drop_area.file_list.item(i).data(Qt.ItemDataRole.UserRole) 
                  for i in range(self.file_drop_area.file_list.count())]
         planning_type = self.plan_type_combo.currentText()
         suggested_filename = self.file_name_preview.text()
+        print("Files to process:", files)  # Add this debug print
 
         if not files:
             QMessageBox.warning(self, "No Files", "Please add files before generating summary.")
+            return
+        
+        if any(file is None for file in files):
+            QMessageBox.warning(self, "Invalid Files", "Some files are invalid. Please check your selection.")
             return
 
         if not planning_type:
@@ -286,7 +293,7 @@ class SummaryFileGeneratorTab(BaseTab):
         self.progress_dialog.canceled.connect(self.cancel_summary_generation)
         self.progress_dialog.show()
 
-        self.worker = SummaryFileGeneratorWorker(files, planning_type, self.parent().temp_dir, suggested_filename, self)
+        self.worker = SummaryFileGeneratorWorker(files, planning_type, self.main_window.temp_dir, suggested_filename, self)
         self.worker.progress_update.connect(self.update_progress)
         self.worker.error_occurred.connect(self.handle_error)
         self.worker.finished.connect(self.handle_finished)
@@ -294,6 +301,7 @@ class SummaryFileGeneratorTab(BaseTab):
         self.worker.operation_cancelled.connect(self.handle_cancellation)
         self.worker.log_message.connect(self.update_output_display)
         self.worker.file_saved.connect(self.progress_dialog.close)
+        
         self.worker.start()
 
     def update_filename_preview(self):
