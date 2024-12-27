@@ -12,6 +12,7 @@ class MainWindow(QMainWindow):
         self.temp_dir = tempfile.mkdtemp()
         self.setWindowTitle("OTR Capacity Plan Upload Supportinator")
         self.setGeometry(100, 100, 800, 600)
+        self.setMinimumWidth(800)
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
