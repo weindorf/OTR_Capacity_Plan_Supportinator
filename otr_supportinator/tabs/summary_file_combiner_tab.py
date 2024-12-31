@@ -1,18 +1,150 @@
+from multiprocessing import Pool, cpu_count
 from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
                              QListWidget, QFileDialog, QScrollArea, QWidget,
                              QTableWidget, QTableWidgetItem, QHeaderView, QDialog, 
                              QRadioButton, QDialogButtonBox, QComboBox, QSpinBox,
-                             QCheckBox, QGroupBox, QSizePolicy, QMessageBox)
-from PyQt6.QtCore import Qt, pyqtSignal, QSize, QRect
+                             QCheckBox, QGroupBox, QSizePolicy, QMessageBox, 
+                             QProgressDialog)
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QRect, QThread, QEventLoop
 from PyQt6.QtGui import QColor, QResizeEvent, QDropEvent, QDragEnterEvent, QFontMetrics, QPainter
 from .base_tab import BaseTab
+from openpyxl import load_workbook, Workbook
+from openpyxl.utils import get_column_letter
+from openpyxl.cell import WriteOnlyCell
+from openpyxl.styles import Font
 import os
 import re
+import numpy as np
+import pandas as pd
+import psutil
+
+def find_optimal_chunk_size(sample_data, target_memory_usage=0.1):
+    available_memory = psutil.virtual_memory().available
+    sample_memory = sample_data.memory_usage(deep=True).sum()
+    memory_per_row = sample_memory / len(sample_data)
+    target_memory = available_memory * target_memory_usage
+    chunk_size = int(target_memory / memory_per_row)
+    return max(chunk_size, 1)
+
+class FileCombinerWorker(QThread):
+    progress_updated = pyqtSignal(int, str)
+    error_occurred = pyqtSignal(str)
+    process_completed = pyqtSignal(list, str)
+    save_location_requested = pyqtSignal()
+    save_location_set = pyqtSignal()
+
+    def __init__(self, file_paths, combinations, planning_week, parent=None):
+        super().__init__(parent)
+        self.file_paths = file_paths
+        self.combinations = combinations
+        self.planning_week = planning_week
+        self.save_directory = None
+        self.combination_row_counts = {}
+        self.header_format = None
+        self.master_data = None
+
+    def run(self):
+        try:
+            self.progress_updated.emit(0, "Requesting save location...")
+            if not self.get_save_location():
+                raise Exception("Save location selection cancelled")
+
+            self.progress_updated.emit(5, "Extracting header format...")
+            self.extract_header_format()
+
+            self.progress_updated.emit(10, "Reading input files...")
+            self.read_and_process_input_files()
+
+            self.progress_updated.emit(50, "Processing combinations...")
+            self.process_combinations()
+
+            self.progress_updated.emit(100, "Process completed.")
+            self.process_completed.emit(self.get_combination_names(), self.save_directory)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+    def extract_header_format(self):
+        wb = load_workbook(self.file_paths[0], read_only=True)
+        ws = wb.active
+        self.header_format = [cell.font for cell in next(ws.rows)]
+
+    def read_and_process_input_files(self):
+        self.master_data = pd.DataFrame()
+        total_files = len(self.file_paths)
+        
+        for i, file_path in enumerate(self.file_paths, 1):
+            df = pd.read_excel(file_path)
+            df['planning_horizon'] = (df['amazon_week'] - self.planning_week) % 52
+            self.master_data = pd.concat([self.master_data, df], ignore_index=True)
+            self.progress_updated.emit(10 + int(40 * i / total_files), f"Reading input file {i}/{total_files}...")
+
+    def process_combinations(self):
+        total_combinations = len(self.combinations)
+        for i, combination in enumerate(self.combinations, 1):
+            self.progress_updated.emit(50 + int(45 * i / total_combinations), f"Processing combination {i}/{total_combinations}...")
+            
+            output_file = os.path.join(self.save_directory, f"{combination['title']}.xlsx")
+            weeks_for_combination = set(range(combination['start_week'], combination['end_week'] + 1))
+            
+            filtered_df = self.master_data[self.master_data['planning_horizon'].isin(weeks_for_combination)]
+            filtered_df = filtered_df.drop(columns=['planning_horizon'])
+            
+            sample_data = filtered_df.head(1000) if len(filtered_df) > 1000 else filtered_df
+            chunk_size = find_optimal_chunk_size(sample_data)
+            
+            wb = Workbook(write_only=True)
+            ws = wb.create_sheet()
+
+            header = []
+            for idx, column_name in enumerate(filtered_df.columns):
+                cell = WriteOnlyCell(ws, value=column_name)
+                if idx < len(self.header_format):
+                    cell.font = Font(
+                        name=self.header_format[idx].name,
+                        size=self.header_format[idx].size,
+                        bold=self.header_format[idx].bold,
+                        italic=self.header_format[idx].italic,
+                    )
+                header.append(cell)
+
+            ws.append(header)
+
+            data_array = filtered_df.values
+
+            for start_row in range(0, len(data_array), chunk_size):
+                end_row = min(start_row + chunk_size, len(data_array))
+                chunk = data_array[start_row:end_row]
+                
+                for row in chunk:
+                    ws.append(row.tolist())
+
+            wb.save(output_file)
+            
+            self.combination_row_counts[combination['title']] = len(filtered_df)
+
+        self.progress_updated.emit(95, "Finalizing process...")
+
+    def get_save_location(self):
+        self.save_location_requested.emit()
+        
+        loop = QEventLoop()
+        self.save_location_set.connect(loop.quit)
+        loop.exec()
+        
+        return self.save_directory is not None
+
+    def set_save_directory(self, directory):
+        if directory:
+            self.save_directory = directory
+            self.save_location_set.emit()
+
+    def get_combination_names(self):
+        return [f"{title}.xlsx with {self.combination_row_counts[title]} rows" for title in self.combination_row_counts]
 
 class FileListWidget(QListWidget):
     files_changed = pyqtSignal()
     file_added = pyqtSignal(str)
-
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
@@ -30,12 +162,20 @@ class FileListWidget(QListWidget):
             for url in event.mimeData().urls():
                 file_path = url.toLocalFile()
                 if file_path.lower().endswith(('.xlsx', '.xls')):
-                    self.addItem(file_path)
-                    self.file_added.emit(file_path)
+                    if not self.file_exists(file_path):
+                        self.addItem(file_path)
+                        self.file_added.emit(file_path)
             event.accept()
             self.files_changed.emit()
         else:
             super().dropEvent(event)
+
+    def file_exists(self, file_path):
+        file_name = os.path.basename(file_path)
+        for index in range(self.count()):
+            if file_name == os.path.basename(self.item(index).text()):
+                return True
+        return False
 
 class WrappingLabel(QLabel):
     def __init__(self, *args, **kwargs):
@@ -96,23 +236,23 @@ class SummaryFileCombinerTab(BaseTab):
 
         # File drop area
         self.file_list = FileListWidget()
-        self.file_list.setMinimumHeight(50)
+        font_metrics = self.file_list.fontMetrics()
+        row_height = font_metrics.height()
+        self.file_list.setMinimumHeight(row_height * 6)
         self.file_list.files_changed.connect(self.update_ui_state)
         self.file_list.file_added.connect(self.process_file)
-        self.file_list.itemSelectionChanged.connect(self.update_ui_state)
+        self.file_list.itemSelectionChanged.connect(self.update_remove_button)
         main_layout.addWidget(self.file_list)
 
         # File buttons layout
         file_buttons_layout = QHBoxLayout()
-
         self.browse_button = QPushButton("Browse Files")
         self.browse_button.clicked.connect(self.browse_files)
-        file_buttons_layout.addWidget(self.browse_button)
-
         self.remove_button = QPushButton("Remove Selected")
         self.remove_button.clicked.connect(self.remove_selected_files)
+        self.remove_button.setEnabled(False)  # Initially disabled
+        file_buttons_layout.addWidget(self.browse_button)
         file_buttons_layout.addWidget(self.remove_button)
-
         main_layout.addLayout(file_buttons_layout)
 
         # Planning week layout
@@ -124,11 +264,17 @@ class SummaryFileCombinerTab(BaseTab):
         main_layout.addWidget(self.planning_week_widget)
 
         # Planned Weeks Available table
-        self.planned_weeks_table = QTableWidget(10, 3)
-        self.planned_weeks_table.setHorizontalHeaderLabels(["Amazon Week", "Available Planned Weeks", "Source Control"])
+        self.planned_weeks_table = QTableWidget(10, 4)
+        self.planned_weeks_table.setHorizontalHeaderLabels(["Planning Horizon", "Amazon Week", "Available Planned Weeks", "Source Control"])
         self.setup_table()
+        
+        # Set the table height to fit its contents exactly
+        self.planned_weeks_table.resizeRowsToContents()
+        table_height = sum([self.planned_weeks_table.rowHeight(i) for i in range(10)]) + self.planned_weeks_table.horizontalHeader().height()
+        self.planned_weeks_table.setFixedHeight(table_height)
+        
         main_layout.addWidget(self.planned_weeks_table)
-
+        
         # Combinations area
         self.combinations_widget = QWidget()
         combinations_layout = QHBoxLayout(self.combinations_widget)
@@ -146,26 +292,44 @@ class SummaryFileCombinerTab(BaseTab):
 
         # Generate Combined Files button
         self.generate_button = QPushButton("Generate Combined Files")
-        self.generate_button.clicked.connect(self.generate_combined_files)
+        self.generate_button.clicked.connect(self.start_combination_process)
         main_layout.addWidget(self.generate_button)
 
         self.update_ui_state()
 
-    def setup_table(self):
-        self.planned_weeks_table.setRowCount(10)
-        self.planned_weeks_table.setColumnCount(4)
-        self.planned_weeks_table.setHorizontalHeaderLabels(["Planning Horizon", "Amazon Week", "Available Planned Weeks", "Source Control"])
+    def update_remove_button(self):
+        self.remove_button.setEnabled(len(self.file_list.selectedItems()) > 0)
 
+    def setup_table(self):
         planning_horizons = ["W-1", "W-2", "W-3", "W-4", "W-5", "W-6", "W-7", "W-8", "W-9", "W-10"]
         for i, horizon in enumerate(planning_horizons):
-            self.planned_weeks_table.setItem(i, 0, QTableWidgetItem(horizon))
-            self.planned_weeks_table.setItem(i, 1, QTableWidgetItem(""))
-            self.planned_weeks_table.setItem(i, 2, QTableWidgetItem(""))
+            # Planning Horizon column
+            item = QTableWidgetItem(horizon)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.planned_weeks_table.setItem(i, 0, item)
+            
+            # Amazon Week column
+            item = QTableWidgetItem("")
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.planned_weeks_table.setItem(i, 1, item)
+            
+            # Available Planned Weeks column
+            item = QTableWidgetItem("")
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.setBackground(QColor("yellow"))
+            self.planned_weeks_table.setItem(i, 2, item)
+            
+            # Source Control column
             button = QPushButton("Select Source")
             button.setEnabled(False)
             self.planned_weeks_table.setCellWidget(i, 3, button)
 
-        self.planned_weeks_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # Set resize mode for each column
+        header = self.planned_weeks_table.horizontalHeader()
+        for i in range(3):  # First three columns
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # Source Control column
+
         self.planned_weeks_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
 
     def create_combination_widget(self, index, default_preset):
@@ -286,9 +450,10 @@ class SummaryFileCombinerTab(BaseTab):
 
     def update_ui_state(self):
         has_files = self.file_list.count() > 0
+        has_selected_files = len(self.file_list.selectedItems()) > 0
         has_error = "Multiple Planning Weeks Detected" in self.planning_week_label.text()
         
-        self.remove_button.setEnabled(has_files and len(self.file_list.selectedItems()) > 0)
+        self.remove_button.setEnabled(has_files)  # Enable if there are any files
         self.browse_button.setEnabled(not has_error)
         self.planned_weeks_table.setEnabled(not has_error)
         self.generate_button.setEnabled(has_files and not has_error)
@@ -334,15 +499,20 @@ class SummaryFileCombinerTab(BaseTab):
             amazon_week = (self.planning_week + i + 1) % 52
             if amazon_week == 0:
                 amazon_week = 52
-            self.planned_weeks_table.item(i, 1).setText(str(amazon_week))
+            item = QTableWidgetItem(str(amazon_week))
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.planned_weeks_table.setItem(i, 1, item)
         
         self.update_planned_weeks()
 
     def browse_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Select Excel Files", "", "Excel Files (*.xlsx *.xls)")
         for file in files:
-            self.file_list.addItem(file)
-            self.process_file(file)
+            if not self.file_list.file_exists(file):
+                self.file_list.addItem(file)
+                self.process_file(file)
+            else:
+                QMessageBox.warning(self, "Duplicate File", f"The file '{os.path.basename(file)}' has already been added.")
 
     def process_file(self, file_path):
         file_name = os.path.basename(file_path)
@@ -373,7 +543,7 @@ class SummaryFileCombinerTab(BaseTab):
     def update_planned_weeks(self):
         for i in range(10):
             self.planned_weeks_table.item(i, 2).setText("")
-            self.planned_weeks_table.item(i, 2).setBackground(QColor("white"))
+            self.planned_weeks_table.item(i, 2).setBackground(QColor("yellow"))
             self.planned_weeks_table.cellWidget(i, 3).setEnabled(False)
 
         for file_path, horizons in self.file_data.items():
@@ -382,14 +552,18 @@ class SummaryFileCombinerTab(BaseTab):
                     row = horizon - 1
                     current_text = self.planned_weeks_table.item(row, 2).text()
                     if current_text:
-                        self.planned_weeks_table.item(row, 2).setText("Duplicate")
-                        self.planned_weeks_table.item(row, 2).setBackground(QColor("red"))
+                        item = QTableWidgetItem("Duplicate")
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        item.setBackground(QColor("red"))
+                        self.planned_weeks_table.setItem(row, 2, item)
                         button = self.planned_weeks_table.cellWidget(row, 3)
                         button.setEnabled(True)
                         button.clicked.connect(lambda checked, r=row: self.select_source(r))
                     else:
-                        self.planned_weeks_table.item(row, 2).setText(f"w-{horizon}")
-                        self.planned_weeks_table.item(row, 2).setBackground(QColor("green"))
+                        item = QTableWidgetItem(f"w-{horizon}")
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        item.setBackground(QColor("green"))
+                        self.planned_weeks_table.setItem(row, 2, item)
 
     def select_source(self, row):
         dialog = QDialog(self)
@@ -416,37 +590,110 @@ class SummaryFileCombinerTab(BaseTab):
                 if radio.isChecked():
                     selected_file = [file for file in files_with_horizon if os.path.basename(file) == radio.text()][0]
                     horizon = int(self.planned_weeks_table.item(row, 0).text().split('-')[1])
-                    self.planned_weeks_table.item(row, 2).setText(f"w-{horizon}")
-                    self.planned_weeks_table.item(row, 2).setBackground(QColor(173, 216, 230))  # Light blue
+                    item = QTableWidgetItem(f"w-{horizon}")
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    item.setBackground(QColor(173, 216, 230))  # Light blue
+                    self.planned_weeks_table.setItem(row, 2, item)
                     self.planned_weeks_table.cellWidget(row, 3).setEnabled(False)
                     # Disconnect the button to prevent multiple connections
                     self.planned_weeks_table.cellWidget(row, 3).clicked.disconnect()
                     break
 
-    def generate_combined_files(self):
-        # Collect enabled combinations
+    def get_enabled_combinations(self):
         enabled_combinations = []
         for combination in self.combinations:
             generate_checkbox = combination.layout().itemAt(3).widget()
-            if generate_checkbox.isChecked():
+            if generate_checkbox.isChecked() and generate_checkbox.isEnabled():
                 start_week = combination.layout().itemAt(1).itemAt(1).widget().value()
                 end_week = combination.layout().itemAt(1).itemAt(3).widget().value()
                 title_label = combination.layout().itemAt(2).widget()
+                title = title_label.text()
                 enabled_combinations.append({
-                    'start_week': start_week,
+                    'start_week': start_week, 
                     'end_week': end_week,
-                    'title': title_label.text()
+                    'title': title
                 })
+        self.log_message(f"Identified {len(enabled_combinations)} enabled combinations")
+        return enabled_combinations
 
+    def get_file_paths(self):
+        return [self.file_list.item(i).text() for i in range(self.file_list.count())]
+
+    def start_combination_process(self):
+        enabled_combinations = self.get_enabled_combinations()
         if not enabled_combinations:
-            QMessageBox.warning(self, "No Combinations", "Please enable at least one combination before generating files.")
+            QMessageBox.warning(self, "No Combinations", "Please enable at least one valid combination before generating files.")
             return
 
-        # TODO: Implement the file combination logic here
-        # For now, we'll just show a message with the enabled combinations
-        combination_details = "\n".join([f"Combination: {c['title']} (Weeks {c['start_week']}-{c['end_week']})" for c in enabled_combinations])
-        QMessageBox.information(self, "Combinations to Generate", f"The following combinations will be generated:\n\n{combination_details}")
+        file_paths = self.get_file_paths()
+        self.worker = FileCombinerWorker(file_paths, enabled_combinations, self.planning_week)
+        self.worker.progress_updated.connect(self.update_progress)
+        self.worker.error_occurred.connect(self.show_error)
+        self.worker.process_completed.connect(self.show_process_completed)
+        self.worker.save_location_requested.connect(self.get_save_location)
+        self.worker.start()
 
+        self.progress_dialog = QProgressDialog("Generating Combined Files", "Cancel", 0, 100, self)
+        self.progress_dialog.setWindowTitle("Generating Combined Files")
+        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress_dialog.setAutoReset(False)
+        self.progress_dialog.setAutoClose(False)
+        self.progress_dialog.canceled.connect(self.cancel_process)
+        self.progress_dialog.show()
+
+    def get_save_location(self):
+        default_dir = r"W:\Shared With Me\11. OTR\01_ShareFolder\output to bigpush"
+        save_dir = QFileDialog.getExistingDirectory(self, "Select Save Directory", default_dir)
+        if save_dir:
+            self.worker.set_save_directory(save_dir)
+        else:
+            self.worker.error_occurred.emit("Save location selection cancelled")
+
+    def cancel_process(self):
+        if self.worker.isRunning():
+            self.worker.terminate()
+            self.worker.wait()
+            QMessageBox.information(self, "Process Cancelled", "The combination process has been cancelled.")
+        self.progress_dialog.close()
+
+    def show_process_completed(self, combination_names, save_directory, row_counts):
+        self.progress_dialog.close()
+        message = f"Process completed successfully.\n\nCombinations created:\n"
+        for name in combination_names:
+            base_name = os.path.splitext(name)[0]  # Remove file extension
+            row_count = row_counts.get(base_name, "Unknown")
+            message += f"{name} with {row_count} rows\n"
+        message += f"\nSaved to: {save_directory}"
+        QMessageBox.information(self, "Process Completed", message)
+
+    def log_message(self, message):
+        print(f"Log: {message}")  # This will print to the console
+
+    def log_save_timing(self, timing_info):
+        self.log_message(timing_info)
+
+    def update_progress(self, value, message):
+        self.progress_dialog.setValue(value)
+        self.progress_dialog.setLabelText(message)
+
+    def process_finished(self):
+        self.progress_dialog.close()
+        QMessageBox.information(self, "Process Completed", "All combinations have been processed and saved.")
+
+    def show_error(self, error_message):
+        QMessageBox.critical(self, "Error", error_message)
+        self.progress_dialog.close()
+
+    def show_process_completed(self, combination_names, save_directory):
+        self.progress_dialog.close()
+        message = f"Process completed successfully.\n\nCombinations created:\n"
+        message += "\n".join(combination_names)
+        message += f"\n\nSaved to: {save_directory}"
+        QMessageBox.information(self, "Process Completed", message)
+
+    def show_combination_completed(self, file_path):
+        QMessageBox.information(self, "Combination Completed", f"Combined file saved as:\n{file_path}")
+        self.progress_dialog.close()
 
     def restart(self):
         self.file_list.clear()
@@ -458,7 +705,3 @@ class SummaryFileCombinerTab(BaseTab):
         for combination in self.combinations:
             self.update_combination_range(combination, self.combinations.index(combination))
         self.update_ui_state()  # Call this to update the UI state after restarting
-
-    def process(self):
-        # Implement the process logic here
-        pass
