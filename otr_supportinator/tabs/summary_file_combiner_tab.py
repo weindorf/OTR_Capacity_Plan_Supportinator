@@ -1,4 +1,3 @@
-from multiprocessing import Pool, cpu_count
 from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
                              QListWidget, QFileDialog, QScrollArea, QWidget,
                              QTableWidget, QTableWidgetItem, QHeaderView, QDialog, 
@@ -230,15 +229,21 @@ class SummaryFileCombinerTab(BaseTab):
         self.planning_week = None
         self.combinations = []
         self.init_ui()
+        
+        # Connect the window's resize event to our custom handler
+        if self.window():
+            self.window().installEventFilter(self)
 
     def init_ui(self):
         # Create a scroll area
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.layout.addWidget(self.scroll_area)
 
         # Create a widget to hold all the content
-        content_widget = QWidget()
-        self.main_layout = QVBoxLayout(content_widget)
+        self.content_widget = QWidget()
+        self.content_layout = QVBoxLayout(self.content_widget)
+        self.scroll_area.setWidget(self.content_widget)
 
         # File drop area
         self.file_list = FileListWidget()
@@ -248,7 +253,7 @@ class SummaryFileCombinerTab(BaseTab):
         self.file_list.files_changed.connect(self.update_ui_state)
         self.file_list.file_added.connect(self.process_file)
         self.file_list.itemSelectionChanged.connect(self.update_remove_button)
-        self.main_layout.addWidget(self.file_list)
+        self.content_layout.addWidget(self.file_list)
 
         # File buttons layout
         file_buttons_layout = QHBoxLayout()
@@ -262,7 +267,7 @@ class SummaryFileCombinerTab(BaseTab):
         file_buttons_layout.addWidget(self.browse_button)
         file_buttons_layout.addWidget(self.remove_button)
         file_buttons_layout.addWidget(self.clear_all_button)
-        self.main_layout.addLayout(file_buttons_layout)
+        self.content_layout.addLayout(file_buttons_layout)
 
         # Planning week layout
         self.planning_week_widget = QWidget()
@@ -270,22 +275,17 @@ class SummaryFileCombinerTab(BaseTab):
         planning_week_layout.setContentsMargins(0, 0, 0, 0)
         self.planning_week_label = QLabel("Planning Week: Not Set")
         planning_week_layout.addWidget(self.planning_week_label)
-        self.main_layout.addWidget(self.planning_week_widget)
+        self.content_layout.addWidget(self.planning_week_widget)
 
         # Planned Weeks Available table
         self.planned_weeks_table = QTableWidget(10, 4)
         self.planned_weeks_table.setHorizontalHeaderLabels(["Planning Horizon", "Amazon Week", "Available Planned Weeks", "Source Control"])
         self.setup_table()
-        
-        # Set the table height to fit its contents exactly
-        self.planned_weeks_table.resizeRowsToContents()
-        table_height = sum([self.planned_weeks_table.rowHeight(i) for i in range(10)]) + self.planned_weeks_table.horizontalHeader().height()
-        self.planned_weeks_table.setFixedHeight(table_height)
-        
-        self.main_layout.addWidget(self.planned_weeks_table)
+        self.content_layout.addWidget(self.planned_weeks_table)
         
         # Combinations area
         self.combinations_widget = QWidget()
+        self.combinations_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         combinations_layout = QHBoxLayout(self.combinations_widget)
         combinations_layout.setSpacing(0)
         combinations_layout.setContentsMargins(0, 0, 0, 0)
@@ -294,23 +294,61 @@ class SummaryFileCombinerTab(BaseTab):
             combination = self.create_combination_widget(i, default_presets[i])
             combinations_layout.addWidget(combination)
             self.combinations.append(combination)
-        self.main_layout.addWidget(self.combinations_widget)
+        self.content_layout.addWidget(self.combinations_widget)
 
         # Add some vertical spacing
-        self.main_layout.addSpacing(20)
+        self.content_layout.addSpacing(20)
 
         # Generate Combined Files button
         self.generate_button = QPushButton("Generate Combined Files")
         self.generate_button.clicked.connect(self.start_combination_process)
-        self.main_layout.addWidget(self.generate_button)
+        self.content_layout.addWidget(self.generate_button)
 
-        # Set the content widget as the scroll area's widget
-        scroll_area.setWidget(content_widget)
+        # Add stretch to push everything to the top
+        self.content_layout.addStretch(1)
 
-        # Add the scroll area to the tab's main layout
-        self.layout.addWidget(scroll_area)
+        # Set initial sizes
+        self.initial_width = 900
+        self.adjust_layout_width(self.initial_width)
 
         self.update_ui_state()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Adjust layout width when the tab is first shown
+        if self.window():
+            self.adjust_layout_width(self.window().width())
+
+    def eventFilter(self, obj, event):
+        if obj == self.window() and event.type() == QResizeEvent.Type.Resize:
+            self.adjust_layout_width(obj.contentsRect().width())
+        return super().eventFilter(obj, event)
+
+    def adjust_layout_width(self, window_width):
+        content_width = window_width - 20  # 20 for some padding
+        if hasattr(self, 'scroll_area') and self.scroll_area.verticalScrollBar().isVisible():
+            content_width -= self.scroll_area.verticalScrollBar().width()
+        
+        self.content_widget.setFixedWidth(content_width)
+        
+        if hasattr(self, 'file_list'):
+            self.file_list.setFixedWidth(content_width - 20)
+        
+        if hasattr(self, 'planned_weeks_table'):
+            self.planned_weeks_table.setFixedWidth(content_width - 20)
+        
+        self.update_combination_widths(content_width)
+
+    def update_combination_widths(self, total_width=None):
+        if not hasattr(self, 'combinations_widget') or self.combinations_widget is None:
+            return
+        
+        if total_width is None:
+            total_width = self.combinations_widget.width()
+        
+        combination_width = (total_width - 40) // 5  # 40 for some padding
+        for combination in self.combinations:
+            combination.setFixedWidth(combination_width)
 
     def clear_all_files(self):
         self.file_list.clear()
@@ -400,18 +438,14 @@ class SummaryFileCombinerTab(BaseTab):
         generate_checkbox.stateChanged.connect(lambda: self.update_combination_title(group, index))
 
         self.update_combination_range(group, index)
+
         return group
     
     def resizeEvent(self, event: QResizeEvent):
         super().resizeEvent(event)
-        self.update_combination_widths()
+        if hasattr(self, 'update_combination_widths'):
+            self.update_combination_widths()
 
-    def update_combination_widths(self):
-        total_width = self.combinations_widget.width()
-        combination_width = total_width // 5
-        for combination in self.combinations:
-            combination.setFixedWidth(combination_width)
-    
     def update_combination_range(self, group, index):
         preset_dropdown = group.layout().itemAt(0).widget()
         start_week = group.layout().itemAt(1).itemAt(1).widget()
