@@ -232,7 +232,13 @@ class SummaryFileCombinerTab(BaseTab):
         self.init_ui()
 
     def init_ui(self):
-        main_layout = self.layout
+        # Create a scroll area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+
+        # Create a widget to hold all the content
+        content_widget = QWidget()
+        self.main_layout = QVBoxLayout(content_widget)
 
         # File drop area
         self.file_list = FileListWidget()
@@ -242,7 +248,7 @@ class SummaryFileCombinerTab(BaseTab):
         self.file_list.files_changed.connect(self.update_ui_state)
         self.file_list.file_added.connect(self.process_file)
         self.file_list.itemSelectionChanged.connect(self.update_remove_button)
-        main_layout.addWidget(self.file_list)
+        self.main_layout.addWidget(self.file_list)
 
         # File buttons layout
         file_buttons_layout = QHBoxLayout()
@@ -251,9 +257,12 @@ class SummaryFileCombinerTab(BaseTab):
         self.remove_button = QPushButton("Remove Selected")
         self.remove_button.clicked.connect(self.remove_selected_files)
         self.remove_button.setEnabled(False)  # Initially disabled
+        self.clear_all_button = QPushButton("Clear All")
+        self.clear_all_button.clicked.connect(self.clear_all_files)
         file_buttons_layout.addWidget(self.browse_button)
         file_buttons_layout.addWidget(self.remove_button)
-        main_layout.addLayout(file_buttons_layout)
+        file_buttons_layout.addWidget(self.clear_all_button)
+        self.main_layout.addLayout(file_buttons_layout)
 
         # Planning week layout
         self.planning_week_widget = QWidget()
@@ -261,7 +270,7 @@ class SummaryFileCombinerTab(BaseTab):
         planning_week_layout.setContentsMargins(0, 0, 0, 0)
         self.planning_week_label = QLabel("Planning Week: Not Set")
         planning_week_layout.addWidget(self.planning_week_label)
-        main_layout.addWidget(self.planning_week_widget)
+        self.main_layout.addWidget(self.planning_week_widget)
 
         # Planned Weeks Available table
         self.planned_weeks_table = QTableWidget(10, 4)
@@ -273,7 +282,7 @@ class SummaryFileCombinerTab(BaseTab):
         table_height = sum([self.planned_weeks_table.rowHeight(i) for i in range(10)]) + self.planned_weeks_table.horizontalHeader().height()
         self.planned_weeks_table.setFixedHeight(table_height)
         
-        main_layout.addWidget(self.planned_weeks_table)
+        self.main_layout.addWidget(self.planned_weeks_table)
         
         # Combinations area
         self.combinations_widget = QWidget()
@@ -285,16 +294,33 @@ class SummaryFileCombinerTab(BaseTab):
             combination = self.create_combination_widget(i, default_presets[i])
             combinations_layout.addWidget(combination)
             self.combinations.append(combination)
-        main_layout.addWidget(self.combinations_widget)
+        self.main_layout.addWidget(self.combinations_widget)
 
         # Add some vertical spacing
-        main_layout.addSpacing(20)
+        self.main_layout.addSpacing(20)
 
         # Generate Combined Files button
         self.generate_button = QPushButton("Generate Combined Files")
         self.generate_button.clicked.connect(self.start_combination_process)
-        main_layout.addWidget(self.generate_button)
+        self.main_layout.addWidget(self.generate_button)
 
+        # Set the content widget as the scroll area's widget
+        scroll_area.setWidget(content_widget)
+
+        # Add the scroll area to the tab's main layout
+        self.layout.addWidget(scroll_area)
+
+        self.update_ui_state()
+
+    def clear_all_files(self):
+        self.file_list.clear()
+        self.file_data.clear()
+        self.planning_week = None
+        self.planning_week_label.setText("Planning Week: Not Set")
+        self.planning_week_widget.setStyleSheet("")
+        self.setup_table()
+        self.update_planned_weeks()
+        self.update_all_combination_titles()
         self.update_ui_state()
 
     def update_remove_button(self):
@@ -334,6 +360,7 @@ class SummaryFileCombinerTab(BaseTab):
 
     def create_combination_widget(self, index, default_preset):
         group = QGroupBox(f"Combination {index + 1}")
+        group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         layout = QVBoxLayout()
 
         # Dropdown for preset selections
@@ -450,10 +477,10 @@ class SummaryFileCombinerTab(BaseTab):
 
     def update_ui_state(self):
         has_files = self.file_list.count() > 0
-        has_selected_files = len(self.file_list.selectedItems()) > 0
         has_error = "Multiple Planning Weeks Detected" in self.planning_week_label.text()
         
-        self.remove_button.setEnabled(has_files)  # Enable if there are any files
+        self.remove_button.setEnabled(has_files)
+        self.clear_all_button.setEnabled(has_files)
         self.browse_button.setEnabled(not has_error)
         self.planned_weeks_table.setEnabled(not has_error)
         self.generate_button.setEnabled(has_files and not has_error)

@@ -1,6 +1,6 @@
 import os
 import tempfile
-from PyQt6.QtWidgets import QMainWindow, QTabWidget, QVBoxLayout, QWidget, QStatusBar, QMenuBar, QMenu, QMessageBox, QApplication
+from PyQt6.QtWidgets import QMainWindow, QTabWidget, QVBoxLayout, QWidget, QStatusBar, QMenuBar, QMenu, QMessageBox, QApplication, QSizePolicy
 from PyQt6.QtGui import QAction
 from .tabs.summary_file_generator_tab import SummaryFileGeneratorTab
 from .tabs.pop_tab import PopTab
@@ -11,14 +11,17 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.temp_dir = tempfile.mkdtemp()
         self.setWindowTitle("OTR Capacity Plan Upload Supportinator")
-        self.setGeometry(100, 100, 800, 600)
-        self.setMinimumWidth(800)
+        self.setGeometry(100, 100, 900, 900)
+        self.setMinimumWidth(900)
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.main_layout = QVBoxLayout(self.central_widget)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
 
         self.tab_widget = QTabWidget()
+        self.tab_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.main_layout.addWidget(self.tab_widget)
 
         self.summary_file_generator_tab = SummaryFileGeneratorTab(self)
@@ -28,6 +31,10 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.summary_file_generator_tab, "Summary File Generator")
         self.tab_widget.addTab(self.pop_tab, "PoP")
         self.tab_widget.addTab(self.summary_file_combiner_tab, "Summary File Combiner")
+
+        # Ensure each tab takes up all available space
+        for i in range(self.tab_widget.count()):
+            self.tab_widget.widget(i).setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
